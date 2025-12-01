@@ -497,10 +497,11 @@ function openHistoryModal(id){ openPaymentHistory(id); }
   moveToTrash: marks item status = 'Removed' locally and attempts to update Firestore.
   If Firestore update succeeds, realtime snapshot will reflect it. If not signed in, it still moves locally.
 */
+// ---------- REPLACEMENT: cloud-aware trash / restore / permanent delete ----------
 async function moveToTrash(id){
-  const idx = state.students.findIndex(s=>s.id===id);
-  if(idx===-1) return;
-  const [r] = state.students.splice(idx,1);
+  const idx = state.students.findIndex(s => s.id === id);
+  if (idx === -1) return;
+  const [r] = state.students.splice(idx, 1);
   r._removedAt = new Date().toISOString();
   r.status = 'Removed';
   // push to local trash
@@ -508,23 +509,23 @@ async function moveToTrash(id){
   save();
   renderAll();
 
-  // attempt to update cloud if possible
-  try {
-    if(firebaseReady && currentUser && db) {
-      // set status and _removedAt in document (merge)
+  // attempt to update cloud if possible (mark as Removed)
+  if (firebaseReady && currentUser && db) {
+    try {
+      // only send the minimal fields necessary or full object as you prefer
       await db.collection('students').doc(String(r.id)).set({
-        status: 'Removed',
-        _removedAt: r._removedAt
+        ...r
       }, { merge: true });
       console.log('Cloud: moved student to Removed status:', r.id);
+    } catch (e) {
+      console.warn('moveToTrash: cloud update failed', e);
     }
-  } catch (e) {
-    console.warn('moveToTrash: cloud update failed', e);
   }
 }
 
 function openTrash(){
-  const modal = document.createElement('div'); modal.className='modal-backdrop';
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
   modal.innerHTML = `<div class="modal"><h3>Trash</h3><div id="trashContent" style="max-height:400px;overflow:auto;margin-top:8px"></div><div style="text-align:right;margin-top:12px"><button class="btn ghost" id="closeT">Close</button></div></div>`;
   document.body.appendChild(modal);
   const box = modal.querySelector('#trashContent');
@@ -542,6 +543,69 @@ function openTrash(){
       </div>`;
       box.appendChild(el);
     });
+
+    // Restore handlers
+    box.querySelectorAll('button[data-r]').forEach(b => {
+      b.onclick = async () => {
+        const id = b.dataset.r;
+        const i = state.trash.findIndex(x => x.id === id);
+        if (i === -1) return;
+        const [it] = state.trash.splice(i, 1);
+        // update local item
+        delete it._removedAt;
+        it.status = 'Active';
+        state.students.push(it);
+        save();
+        renderAll();
+
+        // update cloud
+        if (firebaseReady && currentUser) {
+          try {
+            await saveStudentToFirestore(it);
+            console.log('Restored student in Firestore:', it.id);
+          } catch (e) {
+            console.warn('Failed to restore student in Firestore', e);
+          }
+        }
+
+        // refresh modal UI
+        modal.remove();
+        openTrash();
+      };
+    });
+
+    // Permanent delete handlers
+    box.querySelectorAll('button[data-d]').forEach(b => {
+      b.onclick = async () => {
+        if(!confirm('Delete permanently? This will remove the student from the cloud too (if signed in).')) return;
+        const id = b.dataset.d;
+        const i = state.trash.findIndex(x => x.id === id);
+        if (i === -1) return;
+
+        const [it] = state.trash.splice(i, 1); // remove from local trash
+        save();
+        renderAll();
+
+        // delete from Firestore if possible
+        if (firebaseReady && currentUser && db) {
+          try {
+            await db.collection('students').doc(String(id)).delete();
+            console.log('Deleted student doc from Firestore:', id);
+          } catch (e) {
+            console.warn('Failed to delete student doc from Firestore', e);
+          }
+        }
+
+        // refresh modal UI
+        modal.remove();
+        openTrash();
+      };
+    });
+  }
+
+  modal.querySelector('#closeT').onclick = () => modal.remove();
+}
+// ---------- End replacement ----------
 
     // Restore handlers
     box.querySelectorAll('button[data-r]').forEach(b => {
