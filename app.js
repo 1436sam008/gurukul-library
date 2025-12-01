@@ -89,41 +89,85 @@ async function loadFromFirestore() {
       cloud.push(d);
     });
     if(cloud.length === 0) { alert('No students found in Firestore.'); return; }
-    const localMap = new Map((state.students||[]).map(s => [s.id,s]));
-    cloud.forEach(c => localMap.set(c.id, c));
-    state.students = Array.from(localMap.values());
+    // Cloud wins on merge: overwrite local entries with cloud entries; keep local-only entries if they have no cloud id
+    const cloudMap = new Map(cloud.map(c => [String(c.id), c]));
+    const localMap = new Map((state.students||[]).map(s => [String(s.id), s]));
+    // Start with cloud entries
+    const merged = Array.from(cloudMap.values());
+    // Append any local-only entries (ids not present in cloud) — these might be unsynced local items
+    localMap.forEach((val, key) => {
+      if(!cloudMap.has(key)) merged.push(val);
+    });
+    state.students = merged;
+    // Rebuild trash from cloud where status === 'Removed'
+    const trashFromCloud = cloud.filter(c => (c.status || '').toString() === 'Removed');
+    // keep any local trash entries that don't exist in cloud
+    const localTrashMap = new Map((state.trash||[]).map(t => [String(t.id), t]));
+    trashFromCloud.forEach(t => localTrashMap.set(String(t.id), t));
+    state.trash = Array.from(localTrashMap.values());
     save(); renderAll();
     alert(`Loaded ${cloud.length} students from cloud (merged).`);
   } catch(e) { console.error('loadFromFirestore', e); alert('Load failed: '+(e.message||e)); }
 }
 
+/*
+  Updated realtime sync:
+  - When signed in, cloud is considered the authoritative source.
+  - We derive `state.students` from cloud documents where status !== 'Removed'.
+  - We derive `state.trash` from cloud documents where status === 'Removed'.
+  - Local-only items that are not in cloud are preserved (they are appended) so you don't lose unsynced work.
+  - If a document is deleted from Firestore (doc removed), it won't reappear from localStorage.
+*/
 function startRealtimeSync() {
   if(!db) return console.warn('Firestore not initialized');
   if(window._studentsUnsub) { try { window._studentsUnsub(); } catch(e){} window._studentsUnsub = null; }
+
   window._studentsUnsub = db.collection('students')
     .onSnapshot(snapshot => {
-      if(_cloudWriteLock) return;
+      if(_cloudWriteLock) return; // avoid reacting to our own writes
       const cloudArr = [];
       snapshot.forEach(doc => {
         const d = doc.data() || {};
         d.id = String(d.id || doc.id);
         cloudArr.push(d);
       });
-      const localMap = new Map((state.students||[]).map(s=>[s.id,s]));
-      cloudArr.forEach(c => localMap.set(c.id, c));
-      const merged = Array.from(localMap.values());
-      let needUpdate = merged.length !== (state.students||[]).length;
-      if(!needUpdate) {
+
+      // Build cloud maps
+      const cloudMap = new Map(cloudArr.map(c => [String(c.id), c]));
+
+      // Derive students (exclude those marked Removed)
+      const cloudStudents = cloudArr.filter(c => (c.status || '').toString() !== 'Removed');
+
+      // Derive trash from cloud (status === 'Removed')
+      const cloudTrash = cloudArr.filter(c => (c.status || '').toString() === 'Removed');
+
+      // Keep local-only students that are not present in cloud (e.g., unsynced local creations)
+      const localOnly = (state.students || []).filter(s => !cloudMap.has(String(s.id)));
+
+      // Merge: cloudStudents first, then append local-only
+      const merged = cloudStudents.slice();
+      localOnly.forEach(s => merged.push(s));
+
+      // Update state
+      let needUpdate = false;
+      if(merged.length !== (state.students||[]).length) needUpdate = true;
+      else {
         for(let i=0;i<merged.length;i++){
           if(!state.students[i] || state.students[i].id !== merged[i].id) { needUpdate = true; break; }
         }
       }
+
+      // Rebuild trash: prefer cloudTrash plus any local-only trash
+      const localTrashOnly = (state.trash || []).filter(t => !cloudTrash.find(ct => String(ct.id) === String(t.id)));
+      const mergedTrash = cloudTrash.concat(localTrashOnly);
+
+      state.students = merged;
+      state.trash = mergedTrash;
+
       if(needUpdate) {
-        state.students = merged;
         save(); renderAll();
-        console.log('Realtime: merged cloud -> local, total:', state.students.length);
+        console.log('Realtime: cloud -> local sync, total students:', state.students.length);
       } else {
-        state.students = merged;
         renderAll();
       }
     }, error => {
@@ -448,8 +492,118 @@ function openPaymentHistory(studentId){
 }
 
 function openHistoryModal(id){ openPaymentHistory(id); }
-function moveToTrash(id){ const idx = state.students.findIndex(s=>s.id===id); if(idx===-1) return; const [r]=state.students.splice(idx,1); r._removedAt=new Date().toISOString(); state.trash.push(r); save(); renderAll(); }
-function openTrash(){ const modal=document.createElement('div'); modal.className='modal-backdrop'; modal.innerHTML = `<div class="modal"><h3>Trash</h3><div id="trashContent" style="max-height:400px;overflow:auto;margin-top:8px"></div><div style="text-align:right;margin-top:12px"><button class="btn ghost" id="closeT">Close</button></div></div>`; document.body.appendChild(modal); const box=modal.querySelector('#trashContent'); if(state.trash.length===0) box.innerHTML='<div style="color:var(--muted)">Empty</div>'; else state.trash.forEach(t=>{ const el=document.createElement('div'); el.style.padding='8px'; el.style.borderBottom='1px solid #f4f6fb'; el.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center"><div><strong>${escapeHtml(t.name)}</strong><div style="color:var(--muted);font-size:13px">Removed: ${t._removedAt?.slice(0,10)||''}</div></div><div><button class="btn" data-r="${t.id}">Restore</button> <button class="btn ghost" data-d="${t.id}">Delete</button></div></div>`; box.appendChild(el); }); box.querySelectorAll('button[data-r]').forEach(b=>b.onclick=()=>{ const id=b.dataset.r; const i=state.trash.findIndex(x=>x.id===id); if(i>-1){ const [it]=state.trash.splice(i,1); delete it._removedAt; state.students.push(it); save(); modal.remove(); renderAll(); openTrash(); }}); box.querySelectorAll('button[data-d]').forEach(b=>b.onclick=()=>{ if(confirm('Delete permanently?')){ const id=b.dataset.d; const i=state.trash.findIndex(x=>x.id===id); if(i>-1){ state.trash.splice(i,1); save(); modal.remove(); renderAll(); openTrash(); } } }); modal.querySelector('#closeT').onclick=()=>modal.remove(); }
+
+/*
+  moveToTrash: marks item status = 'Removed' locally and attempts to update Firestore.
+  If Firestore update succeeds, realtime snapshot will reflect it. If not signed in, it still moves locally.
+*/
+async function moveToTrash(id){
+  const idx = state.students.findIndex(s=>s.id===id);
+  if(idx===-1) return;
+  const [r] = state.students.splice(idx,1);
+  r._removedAt = new Date().toISOString();
+  r.status = 'Removed';
+  // push to local trash
+  state.trash.push(r);
+  save();
+  renderAll();
+
+  // attempt to update cloud if possible
+  try {
+    if(firebaseReady && currentUser && db) {
+      // set status and _removedAt in document (merge)
+      await db.collection('students').doc(String(r.id)).set({
+        status: 'Removed',
+        _removedAt: r._removedAt
+      }, { merge: true });
+      console.log('Cloud: moved student to Removed status:', r.id);
+    }
+  } catch (e) {
+    console.warn('moveToTrash: cloud update failed', e);
+  }
+}
+
+function openTrash(){
+  const modal = document.createElement('div'); modal.className='modal-backdrop';
+  modal.innerHTML = `<div class="modal"><h3>Trash</h3><div id="trashContent" style="max-height:400px;overflow:auto;margin-top:8px"></div><div style="text-align:right;margin-top:12px"><button class="btn ghost" id="closeT">Close</button></div></div>`;
+  document.body.appendChild(modal);
+  const box = modal.querySelector('#trashContent');
+
+  if(!state.trash || state.trash.length === 0){
+    box.innerHTML = '<div style="color:var(--muted)">Empty</div>';
+  } else {
+    state.trash.forEach(t => {
+      const el = document.createElement('div');
+      el.style.padding = '8px';
+      el.style.borderBottom = '1px solid #f4f6fb';
+      el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center">
+        <div><strong>${escapeHtml(t.name)}</strong><div style="color:var(--muted);font-size:13px">Removed: ${t._removedAt?.slice(0,10)||''}</div></div>
+        <div><button class="btn" data-r="${t.id}">Restore</button> <button class="btn ghost" data-d="${t.id}">Delete</button></div>
+      </div>`;
+      box.appendChild(el);
+    });
+
+    // Restore handlers
+    box.querySelectorAll('button[data-r]').forEach(b => {
+      b.onclick = async () => {
+        const id = b.dataset.r;
+        const i = state.trash.findIndex(x => x.id === id);
+        if(i === -1) return;
+        const [it] = state.trash.splice(i,1);
+        // update local item
+        delete it._removedAt;
+        it.status = 'Active';
+        state.students.push(it);
+        save();
+        renderAll();
+
+        // update cloud
+        if(firebaseReady && currentUser){
+          try{
+            await saveStudentToFirestore(it);
+            console.log('Restored student in Firestore:', it.id);
+          }catch(e){
+            console.warn('Failed to restore student in Firestore', e);
+          }
+        }
+
+        // refresh modal UI
+        modal.remove();
+        openTrash();
+      };
+    });
+
+    // Permanent delete handlers
+    box.querySelectorAll('button[data-d]').forEach(b => {
+      b.onclick = async () => {
+        if(!confirm('Delete permanently? This will remove the student from the cloud too (if signed in).')) return;
+        const id = b.dataset.d;
+        const i = state.trash.findIndex(x => x.id === id);
+        if(i === -1) return;
+
+        const [it] = state.trash.splice(i,1); // remove from local trash
+        save();
+        renderAll();
+
+        // delete from Firestore if possible
+        if(firebaseReady && currentUser){
+          try{
+            await db.collection('students').doc(String(id)).delete();
+            console.log('Deleted student doc from Firestore:', id);
+          }catch(e){
+            console.warn('Failed to delete student doc from Firestore', e);
+          }
+        }
+
+        // refresh modal UI
+        modal.remove();
+        openTrash();
+      };
+    });
+  }
+
+  modal.querySelector('#closeT').onclick = () => modal.remove();
+}
 
 // Export/import & reports
 function exportData(){ const data=JSON.stringify(state,null,2); const blob=new Blob([data],{type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='lab-data.json'; a.click(); URL.revokeObjectURL(url); }
@@ -702,5 +856,3 @@ initFirebaseIfPossible();
     dash.classList.add('active');
   }
 })();
-
-
