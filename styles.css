@@ -111,3 +111,36 @@ th{color:var(--muted);font-weight:700}
 
 /* Optional: ensure top-level sections don't get weird spacing when hidden */
 .view { margin: 0; padding: 0; }
+
+.grid {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .panel-right {
+    order: 1; /* show first */
+  }
+
+  .panel-left {
+    order: 2; /* go below */
+  }
+
+  /* Panels full width */
+  .panel-left,
+  .panel-right {
+    width: 100%;
+  }
+ /* Make sidebar appear ABOVE topbar */
+  .sidebar {
+    z-index: 11000; /* higher than 10003 of topbar */
+  }
+
+  .sidebar-backdrop {
+    z-index: 10999;
+  }
+
+  /* Make topbar stay behind sidebar, so it doesn't jump */
+  .topbar {
+    position: relative; /* instead of sticky */
+    z-index: 1; /* below sidebar */
+  }
