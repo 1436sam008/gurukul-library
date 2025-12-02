@@ -36,6 +36,11 @@
     <main class="main">
       <div class="topbar">
         <button class="mobile-menu-btn" id="menuBtn" aria-label="Open menu">☰</button>
+        <!-- Bulk CSV import (paste where you want the button) -->
+        <input id="csvBulkInput" type="file" accept=".csv" style="display:none" />
+        <button id="bulkImportBtn" class="btn ghost" title="Import CSV of many students">Import CSV</button>
+        <span id="bulkImportStatus" class="small" style="margin-left:10px; color:var(--muted)"></span>
+
 
         <div class="search">
           <input id="q" placeholder="Search students by name or mobile" />
