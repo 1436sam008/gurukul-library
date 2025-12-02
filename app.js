@@ -74,7 +74,7 @@ async function saveAllToFirestore() {
     });
     _cloudWriteLock = true;
     await batch.commit();
-  } catch(e) { console.error('saveAllToFirestore', e); }
+  } catch(e) { console.error('saveAllToFirestore', e); throw e; }
   finally { setTimeout(()=> { _cloudWriteLock = false; }, 300); }
 }
 
@@ -92,16 +92,13 @@ async function loadFromFirestore() {
     // Cloud wins on merge: overwrite local entries with cloud entries; keep local-only entries if they have no cloud id
     const cloudMap = new Map(cloud.map(c => [String(c.id), c]));
     const localMap = new Map((state.students||[]).map(s => [String(s.id), s]));
-    // Start with cloud entries
     const merged = Array.from(cloudMap.values());
-    // Append any local-only entries (ids not present in cloud) — these might be unsynced local items
     localMap.forEach((val, key) => {
       if(!cloudMap.has(key)) merged.push(val);
     });
     state.students = merged;
     // Rebuild trash from cloud where status === 'Removed'
     const trashFromCloud = cloud.filter(c => (c.status || '').toString() === 'Removed');
-    // keep any local trash entries that don't exist in cloud
     const localTrashMap = new Map((state.trash||[]).map(t => [String(t.id), t]));
     trashFromCloud.forEach(t => localTrashMap.set(String(t.id), t));
     state.trash = Array.from(localTrashMap.values());
@@ -110,14 +107,6 @@ async function loadFromFirestore() {
   } catch(e) { console.error('loadFromFirestore', e); alert('Load failed: '+(e.message||e)); }
 }
 
-/*
-  Updated realtime sync:
-  - When signed in, cloud is considered the authoritative source.
-  - We derive `state.students` from cloud documents where status !== 'Removed'.
-  - We derive `state.trash` from cloud documents where status === 'Removed'.
-  - Local-only items that are not in cloud are preserved (they are appended) so you don't lose unsynced work.
-  - If a document is deleted from Firestore (doc removed), it won't reappear from localStorage.
-*/
 function startRealtimeSync() {
   if(!db) return console.warn('Firestore not initialized');
   if(window._studentsUnsub) { try { window._studentsUnsub(); } catch(e){} window._studentsUnsub = null; }
@@ -132,23 +121,20 @@ function startRealtimeSync() {
         cloudArr.push(d);
       });
 
-      // Build cloud maps
       const cloudMap = new Map(cloudArr.map(c => [String(c.id), c]));
-
-      // Derive students (exclude those marked Removed)
       const cloudStudents = cloudArr.filter(c => (c.status || '').toString() !== 'Removed');
-
-      // Derive trash from cloud (status === 'Removed')
       const cloudTrash = cloudArr.filter(c => (c.status || '').toString() === 'Removed');
-
-      // Keep local-only students that are not present in cloud (e.g., unsynced local creations)
       const localOnly = (state.students || []).filter(s => !cloudMap.has(String(s.id)));
 
-      // Merge: cloudStudents first, then append local-only
       const merged = cloudStudents.slice();
       localOnly.forEach(s => merged.push(s));
 
-      // Update state
+      const localTrashOnly = (state.trash || []).filter(t => !cloudTrash.find(ct => String(ct.id) === String(t.id)));
+      const mergedTrash = cloudTrash.concat(localTrashOnly);
+
+      state.students = merged;
+      state.trash = mergedTrash;
+
       let needUpdate = false;
       if(merged.length !== (state.students||[]).length) needUpdate = true;
       else {
@@ -156,13 +142,6 @@ function startRealtimeSync() {
           if(!state.students[i] || state.students[i].id !== merged[i].id) { needUpdate = true; break; }
         }
       }
-
-      // Rebuild trash: prefer cloudTrash plus any local-only trash
-      const localTrashOnly = (state.trash || []).filter(t => !cloudTrash.find(ct => String(ct.id) === String(t.id)));
-      const mergedTrash = cloudTrash.concat(localTrashOnly);
-
-      state.students = merged;
-      state.trash = mergedTrash;
 
       if(needUpdate) {
         save(); renderAll();
@@ -192,7 +171,7 @@ function save(){
 
 function load(){ const raw = localStorage.getItem(KEY); if(raw) { try { state = JSON.parse(raw); } catch(e){ state = { students: [], trash: [] }; } } renderAll(); }
 
-// Month helpers (unchanged)
+// Month helpers
 function getMonthKey(d){ const dt = new Date(d); return dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0'); }
 function currentMonthKey(){ return getMonthKey(new Date()); }
 function isPaidThisMonth(s){ const m = currentMonthKey(); return (s.payments || []).some(p => String(p.monthFor) === m); }
@@ -348,7 +327,7 @@ document.addEventListener('click', e => {
   if(act==='remove') { if(confirm('Move to trash?')) moveToTrash(id); }
 });
 
-// --- Modals & CRUD (unchanged logic) ---
+// Modals & CRUD
 function openStudentModal(id, readonly){
   const modal = document.createElement('div'); modal.className='modal-backdrop';
   const student = state.students.find(s=>s.id===id) || { id:null, name:'', mobile:'', parentMobile:'', aadhar:'', pan:'', shift:'half-7-15', fee:0, joinDate:'', payments:[], aadharData:'', status:'Active' };
@@ -495,7 +474,6 @@ function openHistoryModal(id){ openPaymentHistory(id); }
 
 /*
   moveToTrash: marks item status = 'Removed' locally and attempts to update Firestore.
-  If Firestore update succeeds, realtime snapshot will reflect it. If not signed in, it still moves locally.
 */
 async function moveToTrash(id){
   const idx = state.students.findIndex(s=>s.id===id);
@@ -503,15 +481,12 @@ async function moveToTrash(id){
   const [r] = state.students.splice(idx,1);
   r._removedAt = new Date().toISOString();
   r.status = 'Removed';
-  // push to local trash
   state.trash.push(r);
   save();
   renderAll();
 
-  // attempt to update cloud if possible
   try {
     if(firebaseReady && currentUser && db) {
-      // set status and _removedAt in document (merge)
       await db.collection('students').doc(String(r.id)).set({
         status: 'Removed',
         _removedAt: r._removedAt
@@ -550,24 +525,21 @@ function openTrash(){
         const i = state.trash.findIndex(x => x.id === id);
         if(i === -1) return;
         const [it] = state.trash.splice(i,1);
-        // update local item
         delete it._removedAt;
         it.status = 'Active';
         state.students.push(it);
         save();
         renderAll();
 
-        // update cloud
         if(firebaseReady && currentUser){
-          try{
+          try {
             await saveStudentToFirestore(it);
-            console.log('Restored student in Firestore:', it.id);
-          }catch(e){
-            console.warn('Failed to restore student in Firestore', e);
+            console.log("Restored student in Firestore:", it.id);
+          } catch(e){
+            console.warn("Restore cloud failed", e);
           }
         }
 
-        // refresh modal UI
         modal.remove();
         openTrash();
       };
@@ -576,26 +548,23 @@ function openTrash(){
     // Permanent delete handlers
     box.querySelectorAll('button[data-d]').forEach(b => {
       b.onclick = async () => {
-        if(!confirm('Delete permanently? This will remove the student from the cloud too (if signed in).')) return;
+        if(!confirm("Delete permanently? This will remove from cloud also.")) return;
         const id = b.dataset.d;
         const i = state.trash.findIndex(x => x.id === id);
         if(i === -1) return;
-
-        const [it] = state.trash.splice(i,1); // remove from local trash
+        state.trash.splice(i,1);
         save();
         renderAll();
 
-        // delete from Firestore if possible
         if(firebaseReady && currentUser){
-          try{
+          try {
             await db.collection('students').doc(String(id)).delete();
-            console.log('Deleted student doc from Firestore:', id);
-          }catch(e){
-            console.warn('Failed to delete student doc from Firestore', e);
+            console.log("Deleted from Firestore:", id);
+          } catch(e){
+            console.warn("Cloud delete failed", e);
           }
         }
 
-        // refresh modal UI
         modal.remove();
         openTrash();
       };
@@ -803,56 +772,115 @@ initFirebaseIfPossible();
   });
 })();
 
-// End of app.js
-// === Ensure only one view shows and re-hook sidebar nav clicks ===
-(function ensureSingleActiveView() {
-  // fix: if some views accidentally had "active" set multiple times, normalize
-  const views = Array.from(document.querySelectorAll('.view'));
-  if (views.length === 0) return; // nothing to do
+// =========================
+// BULK CSV IMPORT
+// =========================
 
-  // Remove extra .active flags, keep only dashboard if multiple active
-  const activeViews = views.filter(v => v.classList.contains('active'));
-  if (activeViews.length === 0) {
-    // nothing active — show dashboard by default
-    const dash = document.getElementById('view-dashboard');
-    if (dash) dash.classList.add('active');
-  } else if (activeViews.length > 1) {
-    // multiple active: clear all and activate dashboard (or first active)
-    views.forEach(v => v.classList.remove('active'));
-    const dash = document.getElementById('view-dashboard') || views[0];
-    dash.classList.add('active');
-  }
-
-  // Re-hook navigation buttons to ensure switchView is used
-  const sidebarNav = document.getElementById('sidebarNav');
-  if (sidebarNav) {
-    // remove existing listeners by cloning (safe) then re-attach a single handler
-    const navClone = sidebarNav.cloneNode(true);
-    sidebarNav.parentNode.replaceChild(navClone, sidebarNav);
-
-    navClone.addEventListener('click', (ev) => {
-      const btn = ev.target.closest('button[data-view]');
-      if (!btn) return;
-      // highlight nav button
-      navClone.querySelectorAll('button[data-view]').forEach(b => b.classList.toggle('active', b === btn));
-      // hide all views and show the requested one
-      const viewName = btn.getAttribute('data-view');
-      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-      const target = document.getElementById('view-' + viewName);
-      if (target) target.classList.add('active');
-      // preserve any existing function you rely on:
-      if (typeof switchView === 'function') {
-        try { switchView(viewName); } catch(e) { /* ignore if not usable */ }
+// robust CSV parser
+function parseCSV(text) {
+  const rows = [];
+  let i = 0, cur = '', row = [], inQuotes = false;
+  while (i < text.length) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i+1] === '"') { cur += '"'; i += 2; continue; }
+        inQuotes = false; i++; continue;
       }
-      // scroll top on small screens for UX
-      window.scrollTo(0,0);
-    });
+      cur += ch; i++; continue;
+    }
+    if (ch === '"'){ inQuotes = true; i++; continue; }
+    if (ch === ','){ row.push(cur); cur=''; i++; continue; }
+    if (ch === '\n'){ row.push(cur); cur=''; rows.push(row); row=[]; i++; continue; }
+    if (ch === '\r'){ i++; continue; }
+    cur += ch; i++;
+  }
+  if (cur !== '' || row.length) row.push(cur);
+  if (row.length) rows.push(row);
+  return rows;
+}
+
+function toKey(h){ return (h||'').trim().toLowerCase(); }
+
+async function importCSVAndAddStudentsBulk(file){
+  if(!file) return alert("Select CSV file");
+  document.getElementById('bulkImportStatus').textContent = 'Reading...';
+  const text = await file.text();
+  const rows = parseCSV(text);
+  if(rows.length < 2) { document.getElementById('bulkImportStatus').textContent = 'No data in CSV'; return alert("CSV has no data"); }
+
+  const header = rows[0].map(toKey);
+  if(!header.includes('name')) { document.getElementById('bulkImportStatus').textContent = 'Missing name column'; return alert("CSV MUST contain 'name' column"); }
+
+  const newList = [];
+  for(let r=1; r<rows.length; r++){
+    const cols = rows[r];
+    if(cols.every(c => !(c||'').trim())) continue;
+    const obj = {};
+    header.forEach((h,i)=> obj[h] = (cols[i]||'').trim());
+    const s = {
+      id: obj.id || uid(),
+      name: obj.name || 'Unknown',
+      mobile: obj.mobile || '',
+      parentMobile: obj.parentmobile || obj['parent_mobile'] || '',
+      shift: obj.shift || 'half-7-15',
+      fee: Number(obj.fee||0),
+      joinDate: obj.joindate || obj['joinDate'] || '',
+      aadhar: obj.aadhar || '',
+      pan: obj.pan || '',
+      payments: [],
+      status: 'Active'
+    };
+    newList.push(s);
   }
 
-  // Finally ensure dashboard active (explicit)
-  const dash = document.getElementById('view-dashboard');
-  if (dash) {
-    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-    dash.classList.add('active');
+  if(newList.length === 0) { document.getElementById('bulkImportStatus').textContent = 'No rows parsed'; return alert('No valid rows found to import.'); }
+
+  const map = new Map((state.students||[]).map(s=>[s.id,s]));
+  newList.forEach(s => map.set(s.id, s));
+  state.students = Array.from(map.values());
+  save(); renderAll();
+
+  document.getElementById('bulkImportStatus').textContent = `Imported ${newList.length} locally.`;
+
+  if(firebaseReady && currentUser && db){
+    if(confirm(`Imported ${newList.length} locally. Upload to Firestore now?`)){
+      document.getElementById('bulkImportStatus').textContent = 'Uploading...';
+      try {
+        // chunked batches of 400
+        const students = state.students || [];
+        const chunkSize = 400;
+        for(let i=0;i<students.length;i+=chunkSize){
+          const slice = students.slice(i, i+chunkSize);
+          const batch = db.batch();
+          slice.forEach(s => {
+            const ref = db.collection('students').doc(String(s.id));
+            batch.set(ref, s, { merge:true });
+          });
+          await batch.commit();
+          document.getElementById('bulkImportStatus').textContent = `Uploaded ${Math.min(i+chunkSize, students.length)} / ${students.length}`;
+        }
+        document.getElementById('bulkImportStatus').textContent = `Upload complete: ${state.students.length} students in Firestore.`;
+        alert('Bulk upload complete ✅');
+      } catch(err) {
+        console.error('Bulk upload failed', err);
+        document.getElementById('bulkImportStatus').textContent = 'Upload failed (see console)';
+        alert('Cloud upload failed: ' + (err && err.message ? err.message : String(err)));
+      }
+    }
+  } else {
+    document.getElementById('bulkImportStatus').textContent = `Imported ${newList.length} locally. Sign-in to upload to cloud.`;
   }
-})();
+}
+
+// Button handlers for bulk import
+document.getElementById('csvBulkInput')?.addEventListener('change', (ev)=>{
+  const f = ev.target.files[0];
+  if(f) importCSVAndAddStudentsBulk(f);
+});
+document.getElementById('bulkImportBtn')?.addEventListener('click', ()=>{
+  document.getElementById('csvBulkInput').value = null;
+  document.getElementById('csvBulkInput').click();
+});
+
+// End of app.js
