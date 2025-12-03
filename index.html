@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Lab Reserve — Lab Manager</title>
-  <link rel="stylesheet" href="styles.css">
+
+  <link rel="stylesheet" href="styles1.css">
   <!-- Firebase (compat) scripts -->
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
@@ -14,7 +15,7 @@
   <div class="app">
     <aside class="sidebar">
       <div class="brand" style="position:relative; padding-right:36px;">
-        <div class="logo">LR</div>
+        <div class="logo"><img src="logo.png" alt="SAM"></div>
         <div>
           <h2>Lab Reserve</h2>
           <small class="brand-sub">Seat Reservation</small>
@@ -30,32 +31,31 @@
         <button data-view="shifts">Shift Config</button>
       </nav>
 
-      <div class="sidebar-footer">Manager: <strong id="mgrName">Admin</strong></div>
+      <div class="sidebar-footer">Manager: <strong id="mgrName">SAM</strong></div>
     </aside>
 
     <main class="main">
       <div class="topbar">
         <button class="mobile-menu-btn" id="menuBtn" aria-label="Open menu">☰</button>
-        <!-- Bulk CSV import (paste where you want the button) -->
-        <input id="csvBulkInput" type="file" accept=".csv" style="display:none" />
-        <button id="bulkImportBtn" class="btn ghost" title="Import CSV of many students">Import CSV</button>
-        <span id="bulkImportStatus" class="small" style="margin-left:10px; color:var(--muted)"></span>
-
-
-        <div class="search">
+        <div class="actions">
+          <div class="act">
+            <div id="userStatus" class="small status">Firebase: initializing...</div>
+          <button class="btn ghost" id="btnAuth">Sign in</button>
+          <button class="btn ghost" id="btnSaveCloud">Save Cloud</button>
+          <button class="btn ghost hide" id="btnLoadCloud">Load Cloud</button>
+          <button class="btn ghost hide" id="importBtn">Import</button>
+          <button class="btn ghost hide" id="exportBtn">Export</button>
+          <!-- Bulk CSV import (paste where you want the button) -->
+          <input id="csvBulkInput" type="file" accept=".csv" style="display:none" />
+          <button id="bulkImportBtn" class="btn ghost hide" title="Import CSV of many students">Import CSV</button>
+          <span id="bulkImportStatus" class="small" style="margin-left:10px; color:var(--muted)"></span>
+          <button class="btn" id="addBtn">Add Student</button>
+          </div>
+          <div class="search hide">
           <input id="q" placeholder="Search students by name or mobile" />
           <div class="sep">|</div>
           <div class="today">Today: <span id="today"></span></div>
         </div>
-
-        <div class="actions">
-          <div id="userStatus" class="small status">Firebase: initializing...</div>
-          <button class="btn ghost" id="btnAuth">Sign in</button>
-          <button class="btn ghost" id="btnSaveCloud">Save Cloud</button>
-          <button class="btn ghost" id="btnLoadCloud">Load Cloud</button>
-          <button class="btn ghost" id="importBtn">Import</button>
-          <button class="btn ghost" id="exportBtn">Export</button>
-          <button class="btn" id="addBtn">Add Student</button>
         </div>
       </div>
 
@@ -124,17 +124,17 @@
             </div>
 
             <div class="item">
-              <div>
+              <div class="hide">
                 <div class="bold">Reports</div>
                 <div class="small">Monthly CSV & Summary</div>
               </div>
-              <div class="report-actions">
+              <div class="report-actions hide">
                 <button class="btn" id="monthlyReport">CSV</button>
                 <button class="btn ghost" id="summaryReport">Summary</button>
               </div>
             </div>
 
-            <footer>Tip: This app stores data locally. Use Export to backup.</footer>
+            <footer>Tip: Always click on save to cloud so your data will update.</footer>
           </aside>
         </div>
       </section>
